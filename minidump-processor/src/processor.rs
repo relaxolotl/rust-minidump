@@ -100,16 +100,17 @@ where
         .get_stream::<MinidumpSystemInfo>()
         .or(Err(ProcessError::MissingSystemInfo))?;
 
-    let mut os_version = format!(
+    let os_version = format!(
         "{}.{}.{}",
         dump_system_info.raw.major_version,
         dump_system_info.raw.minor_version,
         dump_system_info.raw.build_number
     );
-    if let Some(csd_version) = dump_system_info.csd_version() {
-        os_version.push(' ');
-        os_version.push_str(&csd_version);
-    }
+
+    let os_build = dump_system_info
+        .csd_version()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty());
 
     let linux_standard_base = dump.get_stream::<MinidumpLinuxLsbRelease>().ok();
     let linux_cpu_info = dump
@@ -163,6 +164,7 @@ where
     let system_info = SystemInfo {
         os: dump_system_info.os,
         os_version: Some(os_version),
+        os_build,
         cpu: dump_system_info.cpu,
         cpu_info,
         cpu_microcode_version,
@@ -231,9 +233,11 @@ where
     let mut threads = vec![];
     let mut requesting_thread = None;
     for (i, thread) in thread_list.threads.iter().enumerate() {
+        let id = thread.raw.thread_id;
+
         // If this is the thread that wrote the dump, skip processing it.
-        if dump_thread_id.is_some() && dump_thread_id.unwrap() == thread.raw.thread_id {
-            threads.push(CallStack::with_info(CallStackInfo::DumpThreadSkipped));
+        if dump_thread_id.is_some() && dump_thread_id.unwrap() == id {
+            threads.push(CallStack::with_info(id, CallStackInfo::DumpThreadSkipped));
             continue;
         }
 
@@ -258,6 +262,7 @@ where
 
         let mut stack =
             stackwalker::walk_stack(&context, stack.as_deref(), &modules, symbol_provider);
+        stack.thread_id = id;
 
         for frame in &mut stack.frames {
             // If the frame doesn't have a loaded module, try to find an unloaded module

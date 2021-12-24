@@ -58,9 +58,13 @@ pub struct StackFrame {
     ///
     /// On some architectures, the return address as saved on the stack or in
     /// a register is fine for looking up the point of the call. On others, it
-    /// requires adjustment. ReturnAddress returns the address as saved by the
+    /// requires adjustment. `return_address` returns the address as saved by the
     /// machine.
     pub instruction: u64,
+
+    /// Return the actual return address, as saved on the stack or in a
+    /// register. See the comments for `instruction`, below, for details.
+    pub return_address: u64,
 
     /// The module in which the instruction resides.
     pub module: Option<MinidumpModule>,
@@ -131,6 +135,8 @@ pub struct CallStack {
     pub frames: Vec<StackFrame>,
     /// Information about this `CallStack`.
     pub info: CallStackInfo,
+    /// The identifier of the thread.
+    pub thread_id: u32,
     /// The name of the thread, if known.
     pub thread_name: Option<String>,
     /// The GetLastError() value stored in the TEB.
@@ -226,11 +232,18 @@ impl FrameTrust {
     }
 }
 
+impl Default for FrameTrust {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 impl StackFrame {
     /// Create a `StackFrame` from a `MinidumpContext`.
     pub fn from_context(context: MinidumpContext, trust: FrameTrust) -> StackFrame {
         StackFrame {
             instruction: context.get_instruction_pointer(),
+            return_address: context.get_instruction_pointer(),
             module: None,
             unloaded_modules: BTreeMap::new(),
             function_name: None,
@@ -326,10 +339,11 @@ fn json_registers(ctx: &MinidumpContext) -> serde_json::Value {
 
 impl CallStack {
     /// Create a `CallStack` with `info` and no frames.
-    pub fn with_info(info: CallStackInfo) -> CallStack {
+    pub fn with_info(id: u32, info: CallStackInfo) -> CallStack {
         CallStack {
             info,
             frames: vec![],
+            thread_id: id,
             thread_name: None,
             last_error_value: None,
         }

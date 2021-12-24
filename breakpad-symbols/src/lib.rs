@@ -250,6 +250,18 @@ impl fmt::Display for SymbolError {
     }
 }
 
+impl std::error::Error for SymbolError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        None
+        // TODO(ja): Implement std::error::Error across the board
+        // match self {
+        //     SymbolError::NotFound => None,
+        //     SymbolError::LoadError(e) => Some(e),
+        //     SymbolError::ParseError(e) => Some(e),
+        // }
+    }
+}
+
 /// A trait for things that can locate symbols for a given module.
 pub trait SymbolSupplier {
     /// Locate and load a symbol file for `module`.
