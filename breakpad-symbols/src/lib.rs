@@ -31,7 +31,6 @@
 //!               "vswprintf");
 //! ```
 
-use failure::Error;
 use log::{debug, trace, warn};
 use reqwest::blocking::Client;
 use reqwest::Url;
@@ -41,7 +40,6 @@ use std::borrow::Cow;
 use std::boxed::Box;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -53,6 +51,14 @@ pub use sym_file::walker;
 pub use crate::sym_file::{CfiRules, SymbolFile};
 
 mod sym_file;
+
+// Re-exports for the purposes of the cfi_eval fuzzer. Not public API.
+#[doc(hidden)]
+#[cfg(feature = "fuzz")]
+pub mod fuzzing_private_exports {
+    pub use crate::sym_file::walker::{eval_win_expr_for_fuzzer, walk_with_stack_cfi};
+    pub use crate::sym_file::{StackInfoWin, WinStackThing};
+}
 
 /// Statistics on the symbols of a module.
 #[derive(Default, Debug)]
@@ -194,14 +200,16 @@ pub fn relative_symbol_path(module: &dyn Module, extension: &str) -> Option<Stri
 /// Since symbol files can be on the order of a gigabyte(!) and downloaded
 /// from the network, aggressive caching is pretty important. The current
 /// approach is a nice balance of simple and effective.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SymbolError {
     /// Symbol file could not be found.
     ///
     /// In this case other symbol providers may still be able to find it!
+    #[error("symbol file not found")]
     NotFound,
     /// Symbol file could not be loaded into memory.
-    LoadError(Error),
+    #[error("couldn't read input stream")]
+    LoadError(#[from] std::io::Error),
     /// Symbol file was too corrupt to be parsed at all.
     ///
     /// Because symbol files are pretty modular, many corruptions/ambiguities
@@ -209,7 +217,8 @@ pub enum SymbolError {
     /// (e.g. a bad STACK WIN line can be discarded without affecting anything
     /// else). But sometimes we can't make any sense of the symbol file, and
     /// you find yourself here.
-    ParseError(Error),
+    #[error("parse error: {0} at line {1}")]
+    ParseError(&'static str, u64),
 }
 
 /// An error produced by fill_symbol.
@@ -235,30 +244,8 @@ impl PartialEq for SymbolError {
             (self, other),
             (SymbolError::NotFound, SymbolError::NotFound)
                 | (SymbolError::LoadError(_), SymbolError::LoadError(_))
-                | (SymbolError::ParseError(_), SymbolError::ParseError(_))
+                | (SymbolError::ParseError(..), SymbolError::ParseError(..))
         )
-    }
-}
-
-impl fmt::Display for SymbolError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            SymbolError::NotFound => write!(f, "Not found"),
-            SymbolError::LoadError(e) => write!(f, "Load error: {}", e),
-            SymbolError::ParseError(e) => write!(f, "Parse error: {}", e),
-        }
-    }
-}
-
-impl std::error::Error for SymbolError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
-        // TODO(ja): Implement std::error::Error across the board
-        // match self {
-        //     SymbolError::NotFound => None,
-        //     SymbolError::LoadError(e) => Some(e),
-        //     SymbolError::ParseError(e) => Some(e),
-        // }
     }
 }
 
@@ -727,7 +714,7 @@ impl Symbolizer {
                     Err(SymbolError::LoadError(_)) => {
                         stats.loaded_symbols = false;
                     }
-                    Err(SymbolError::ParseError(_)) => {
+                    Err(SymbolError::ParseError(..)) => {
                         stats.loaded_symbols = true;
                         stats.corrupt_symbols = true;
                     }
@@ -799,7 +786,6 @@ mod test {
     use std::fs::File;
     use std::io::Write;
     use std::path::{Path, PathBuf};
-    use tempdir::TempDir;
 
     #[test]
     fn test_relative_symbol_path() {
@@ -899,7 +885,7 @@ mod test {
 
     #[test]
     fn test_simple_symbol_supplier() {
-        let t = TempDir::new("symtest").unwrap();
+        let t = tempfile::tempdir().unwrap();
         let paths = mksubdirs(t.path(), &["one", "two"]);
 
         let supplier = SimpleSymbolSupplier::new(paths.clone());
@@ -933,7 +919,7 @@ mod test {
         write_bad_symbol_file(&paths[0].join(sym));
         let res = supplier.locate_symbols(&mal);
         assert!(
-            matches!(res, Err(SymbolError::ParseError(_))),
+            matches!(res, Err(SymbolError::ParseError(..))),
             "{}",
             format!("Correctly failed to parse {}, result: {:?}", sym, res)
         );
@@ -941,7 +927,7 @@ mod test {
 
     #[test]
     fn test_symbolizer() {
-        let t = TempDir::new("symtest").unwrap();
+        let t = tempfile::tempdir().unwrap();
         let path = t.path();
 
         // TODO: This could really use a MockSupplier

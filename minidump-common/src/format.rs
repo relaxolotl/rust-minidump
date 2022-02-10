@@ -6519,8 +6519,22 @@ pub enum ExceptionCodeLinux {
 
 // These values come from asm-generic/siginfo.h
 #[derive(Copy, Clone, PartialEq, Debug, Primitive)]
-pub enum ExceptionCodeLinuxSigillKind {
+#[repr(i32)]
+pub enum ExceptionCodeLinuxSicode {
     SI_USER = 0,
+    SI_KERNEL = 0x80,
+    SI_QUEUE = -1i32,
+    SI_TIMER = -2i32,
+    SI_MESGQ = -3i32,
+    SI_ASYNCIO = -4i32,
+    SI_SIGIO = -5i32,
+    SI_TKILL = -6i32,
+    SI_DETHREAD = -7i32,
+    SI_ASYNCNL = -60i32,
+}
+
+#[derive(Copy, Clone, PartialEq, Debug, Primitive)]
+pub enum ExceptionCodeLinuxSigillKind {
     ILL_ILLOPC = 1,
     ILL_ILLOPN = 2,
     ILL_ILLADR = 3,
@@ -6529,12 +6543,21 @@ pub enum ExceptionCodeLinuxSigillKind {
     ILL_PRVREG = 6,
     ILL_COPROC = 7,
     ILL_BADSTK = 8,
-    SI_KERNEL = 0x80,
+    ILL_BADIADDR = 9,
+}
+
+#[derive(Copy, Clone, PartialEq, Debug, Primitive)]
+pub enum ExceptionCodeLinuxSigtrapKind {
+    TRAP_BRKPT = 1,
+    TRAP_TRACE = 2,
+    TRAP_BRANCH = 3,
+    TRAP_HWBKPT = 4,
+    TRAP_UNK = 5,
+    TRAP_PERF = 6,
 }
 
 #[derive(Copy, Clone, PartialEq, Debug, Primitive)]
 pub enum ExceptionCodeLinuxSigfpeKind {
-    SI_USER = 0,
     FPE_INTDIV = 1,
     FPE_INTOVF = 2,
     FPE_FLTDIV = 3,
@@ -6543,28 +6566,29 @@ pub enum ExceptionCodeLinuxSigfpeKind {
     FPE_FLTRES = 6,
     FPE_FLTINV = 7,
     FPE_FLTSUB = 8,
-    SI_KERNEL = 0x80,
 }
 
 #[derive(Copy, Clone, PartialEq, Debug, Primitive)]
 pub enum ExceptionCodeLinuxSigsegvKind {
-    SI_USER = 0,
     SEGV_MAPERR = 1,
     SEGV_ACCERR = 2,
     SEGV_BNDERR = 3,
     SEGV_PKUERR = 4,
-    SI_KERNEL = 0x80,
 }
 
 #[derive(Copy, Clone, PartialEq, Debug, Primitive)]
 pub enum ExceptionCodeLinuxSigbusKind {
-    SI_USER = 0,
     BUS_ADRALN = 1,
     BUS_ADRERR = 2,
     BUS_OBJERR = 3,
     BUS_MCEERR_AR = 4,
     BUS_MCEERR_AO = 5,
-    SI_KERNEL = 0x80,
+}
+
+#[derive(Copy, Clone, PartialEq, Debug, Primitive)]
+pub enum ExceptionCodeLinuxSigsysKind {
+    SYS_SECCOMP = 1,
+    SYS_USER_DISPATCH = 2,
 }
 
 /// Values for [`MINIDUMP_EXCEPTION::exception_code`] for crashes on macOS
@@ -6589,6 +6613,7 @@ pub enum ExceptionCodeMac {
     EXC_MACH_SYSCALL = 8,
     EXC_RPC_ALERT = 9,
     EXC_RESOURCE = 11,
+    EXC_GUARD = 12,
     /// Fake exception code used by Crashpad's SimulateCrash ('CPsx')
     SIMULATED = 0x43507378,
 }
@@ -6603,6 +6628,7 @@ pub enum ExceptionCodeMacBadAccessKernType {
     // These are relevant kern_return_t values from mach/kern_return.h
     KERN_INVALID_ADDRESS = 1,
     KERN_PROTECTION_FAILURE = 2,
+    KERN_FAILURE = 5,
     KERN_NO_ACCESS = 8,
     KERN_MEMORY_FAILURE = 9,
     KERN_MEMORY_ERROR = 10,
@@ -6795,6 +6821,95 @@ pub enum ExceptionCodeMacResourceThreadsFlavor {
     FLAVOR_THREADS_HIGH_WATERMARK = 1,
 }
 
+/// Mac/iOS Guard exception types
+///
+/// See the [osfmk/kern/exc_guard.h][header] header in Apple's kernel sources
+///
+/// [header]: https://github.com/apple/darwin-xnu/blob/main/osfmk/kern/exc_guard.h
+#[derive(Copy, Clone, PartialEq, Debug, Primitive)]
+pub enum ExceptionCodeMacGuardType {
+    GUARD_TYPE_NONE = 0,
+    GUARD_TYPE_MACH_PORT = 1,
+    GUARD_TYPE_FD = 2,
+    GUARD_TYPE_USER = 3,
+    GUARD_TYPE_VN = 4,
+    GUARD_TYPE_VIRT_MEMORY = 5,
+}
+
+/// Mac/iOS Mach port guard exception flavors
+///
+/// See the [osfmk/mach/port.h][header] header in Apple's kernel sources
+///
+/// [header]: https://github.com/apple/darwin-xnu/blob/main/osfmk/mach/port.h
+#[derive(Copy, Clone, PartialEq, Debug, Primitive)]
+pub enum ExceptionCodeMacGuardMachPortFlavor {
+    GUARD_EXC_DESTROY = 0x00000001,
+    GUARD_EXC_MOD_REFS = 0x00000002,
+    GUARD_EXC_SET_CONTEXT = 0x00000004,
+    GUARD_EXC_UNGUARDED = 0x00000008,
+    GUARD_EXC_INCORRECT_GUARD = 0x00000010,
+    GUARD_EXC_IMMOVABLE = 0x00000020,
+    GUARD_EXC_STRICT_REPLY = 0x00000040,
+    GUARD_EXC_MSG_FILTERED = 0x00000080,
+    GUARD_EXC_INVALID_RIGHT = 0x00000100,
+    GUARD_EXC_INVALID_NAME = 0x00000200,
+    GUARD_EXC_INVALID_VALUE = 0x00000400,
+    GUARD_EXC_INVALID_ARGUMENT = 0x00000800,
+    GUARD_EXC_RIGHT_EXISTS = 0x00001000,
+    GUARD_EXC_KERN_NO_SPACE = 0x00002000,
+    GUARD_EXC_KERN_FAILURE = 0x00004000,
+    GUARD_EXC_KERN_RESOURCE = 0x00008000,
+    GUARD_EXC_SEND_INVALID_REPLY = 0x00010000,
+    GUARD_EXC_SEND_INVALID_VOUCHER = 0x00020000,
+    GUARD_EXC_SEND_INVALID_RIGHT = 0x00040000,
+    GUARD_EXC_RCV_INVALID_NAME = 0x00080000,
+    GUARD_EXC_RCV_GUARDED_DESC = 0x00100000,
+    GUARD_EXC_MOD_REFS_NON_FATAL = 0x00200000,
+    GUARD_EXC_IMMOVABLE_NON_FATAL = 0x00400000,
+}
+
+/// Mac/iOS fd guard exception flavors
+///
+/// See the [bsd/sys/guarded.h][header] header in Apple's kernel sources
+///
+/// [header]: https://github.com/apple/darwin-xnu/blob/main/bsd/sys/guarded.h
+#[derive(Copy, Clone, PartialEq, Debug, Primitive)]
+pub enum ExceptionCodeMacGuardFDFlavor {
+    GUARD_EXC_CLOSE = 0x00000001,
+    GUARD_EXC_DUP = 0x00000002,
+    GUARD_EXC_NOCLOEXEC = 0x00000004,
+    GUARD_EXC_SOCKET_IPC = 0x00000008,
+    GUARD_EXC_FILEPORT = 0x00000010,
+    GUARD_EXC_MISMATCH = 0x00000020,
+    GUARD_EXC_WRITE = 0x00000040,
+}
+
+/// Mac/iOS vnode guard exception flavors
+///
+/// See the [bsd/sys/guarded.h][header] header in Apple's kernel sources
+///
+/// [header]: https://github.com/apple/darwin-xnu/blob/main/bsd/sys/guarded.h
+#[derive(Copy, Clone, PartialEq, Debug, Primitive)]
+pub enum ExceptionCodeMacGuardVNFlavor {
+    GUARD_EXC_RENAME_TO = 0x00000001,
+    GUARD_EXC_RENAME_FROM = 0x00000002,
+    GUARD_EXC_UNLINK = 0x00000004,
+    GUARD_EXC_WRITE_OTHER = 0x00000008,
+    GUARD_EXC_TRUNC_OTHER = 0x00000010,
+    GUARD_EXC_LINK = 0x00000020,
+    GUARD_EXC_EXCHDATA = 0x00000040,
+}
+
+/// Mac/iOS virtual memory guard exception flavors
+///
+/// See the [osfmk/mach/vm_statistics.h][header] header in Apple's kernel sources
+///
+/// [header]: https://github.com/apple/darwin-xnu/blob/main/osfmk/mach/vm_statistics.h
+#[derive(Copy, Clone, PartialEq, Debug, Primitive)]
+pub enum ExceptionCodeMacGuardVirtMemoryFlavor {
+    GUARD_EXC_DEALLOC_GAP = 0x00000001,
+}
+
 /// Valid bits in a `context_flags` for [`ContextFlagsCpu`]
 pub const CONTEXT_CPU_MASK: u32 = 0xffffff00;
 /// x86 and x64 contexts have this bit set in their `context_flags` when they have
@@ -6891,6 +7006,7 @@ pub struct SSE_REGISTERS {
 ///
 /// This struct matches the definition of `CONTEXT` in WinNT.h for x86-64.
 #[derive(Debug, SmartDefault, Clone, Pread, SizeWith)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct CONTEXT_AMD64 {
     pub p1_home: u64,
     pub p2_home: u64,
@@ -6951,6 +7067,7 @@ pub struct CONTEXT_AMD64 {
 
 /// ARM floating point state
 #[derive(Debug, Clone, Default, Pread, SizeWith)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct FLOATING_SAVE_AREA_ARM {
     pub fpscr: u64,
     pub regs: [u64; 32],
@@ -6962,6 +7079,7 @@ pub struct FLOATING_SAVE_AREA_ARM {
 /// This is a Breakpad extension, and does not match the definition of `CONTEXT` for ARM
 /// in WinNT.h.
 #[derive(Debug, Clone, Default, Pread, SizeWith)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct CONTEXT_ARM {
     pub context_flags: u32,
     pub iregs: [u32; 16],
@@ -6994,6 +7112,7 @@ impl ArmRegisterNumbers {
 
 /// aarch64 floating point state (old)
 #[derive(Debug, Clone, Copy, Default, Pread, SizeWith)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct FLOATING_SAVE_AREA_ARM64_OLD {
     pub fpsr: u32,
     pub fpcr: u32,
@@ -7005,6 +7124,7 @@ pub struct FLOATING_SAVE_AREA_ARM64_OLD {
 /// This is a Breakpad extension.
 #[derive(Debug, Clone, Copy, Default, Pread, SizeWith)]
 #[repr(packed)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct CONTEXT_ARM64_OLD {
     pub context_flags: u64,
     pub iregs: [u64; 32],
@@ -7015,6 +7135,7 @@ pub struct CONTEXT_ARM64_OLD {
 
 /// aarch64 floating point state
 #[derive(Debug, Clone, Default, Pread, SizeWith)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct FLOATING_SAVE_AREA_ARM64 {
     pub regs: [u128; 32usize],
     pub fpsr: u32,
@@ -7026,6 +7147,7 @@ pub struct FLOATING_SAVE_AREA_ARM64 {
 /// This is a Breakpad extension, and does not match the definition of `CONTEXT` for aarch64
 /// in WinNT.h.
 #[derive(Debug, Default, Clone, Pread, SizeWith)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct CONTEXT_ARM64 {
     pub context_flags: u32,
     pub cpsr: u32,
@@ -7061,6 +7183,7 @@ impl Arm64RegisterNumbers {
 
 /// MIPS floating point state
 #[derive(Debug, Clone, Pread, SizeWith)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct FLOATING_SAVE_AREA_MIPS {
     pub regs: [u64; 32],
     pub fpcsr: u32,
@@ -7071,6 +7194,7 @@ pub struct FLOATING_SAVE_AREA_MIPS {
 ///
 /// This is a Breakpad extension, as there is no definition of `CONTEXT` for MIPS in WinNT.h.
 #[derive(Debug, Clone, Pread, SizeWith)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct CONTEXT_MIPS {
     pub context_flags: u32,
     pub _pad0: u32,
@@ -7108,6 +7232,7 @@ pub enum MipsRegisterNumbers {
 
 /// PPC floating point state
 #[derive(Debug, Clone, Pread, SizeWith)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct FLOATING_SAVE_AREA_PPC {
     pub fpregs: [u64; 32],
     pub fpscr_pad: u32,
@@ -7116,6 +7241,7 @@ pub struct FLOATING_SAVE_AREA_PPC {
 
 /// PPC vector state
 #[derive(Debug, Clone, Pread, SizeWith)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct VECTOR_SAVE_AREA_PPC {
     pub save_vr: [u128; 32],
     pub save_vscr: u128,
@@ -7128,6 +7254,7 @@ pub struct VECTOR_SAVE_AREA_PPC {
 ///
 /// This is a Breakpad extension, as there is no definition of `CONTEXT` for PPC in WinNT.h.
 #[derive(Debug, Clone, Pread, SizeWith)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct CONTEXT_PPC {
     pub context_flags: u32,
     pub srr0: u32,
@@ -7154,6 +7281,7 @@ pub enum PpcRegisterNumbers {
 ///
 /// This is a Breakpad extension, as there is no definition of `CONTEXT` for PPC64 in WinNT.h.
 #[derive(Debug, Clone, Pread, SizeWith)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct CONTEXT_PPC64 {
     pub context_flags: u64,
     pub srr0: u64,
@@ -7177,6 +7305,7 @@ pub enum Ppc64RegisterNumbers {
 
 /// SPARC floating point state
 #[derive(Debug, Clone, Pread, SizeWith)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct FLOATING_SAVE_AREA_SPARC {
     pub regs: [u64; 32],
     pub filler: u64,
@@ -7187,6 +7316,7 @@ pub struct FLOATING_SAVE_AREA_SPARC {
 ///
 /// This is a Breakpad extension, as there is no definition of `CONTEXT` for SPARC in WinNT.h.
 #[derive(Debug, Clone, Pread, SizeWith)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct CONTEXT_SPARC {
     pub context_flags: u32,
     pub flag_pad: u32,
@@ -7211,6 +7341,7 @@ pub enum SparcRegisterNumbers {
 ///
 /// This struct matches the definition of the `FLOATING_SAVE_AREA` struct from WinNT.h.
 #[derive(Debug, Clone, SmartDefault, Pread, SizeWith)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct FLOATING_SAVE_AREA_X86 {
     pub control_word: u32,
     pub status_word: u32,
@@ -7228,6 +7359,7 @@ pub struct FLOATING_SAVE_AREA_X86 {
 ///
 /// This struct matches the definition of `CONTEXT` in WinNT.h for x86.
 #[derive(Debug, Clone, SmartDefault, Pread, SizeWith)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct CONTEXT_X86 {
     pub context_flags: u32,
     pub dr0: u32,
@@ -8044,7 +8176,7 @@ impl MINIDUMP_MODULE_CRASHPAD_INFO {
 /// module carried within a minidump file.
 ///
 /// See <https://crashpad.chromium.org/doxygen/structcrashpad_1_1MinidumpModuleCrashpadInfoLink.html>
-#[derive(Clone, Debug, Pread)]
+#[derive(Clone, Debug, Pread, SizeWith)]
 pub struct MINIDUMP_MODULE_CRASHPAD_INFO_LINK {
     /// A link to a MINIDUMP_MODULE structure in the module list stream.
     ///

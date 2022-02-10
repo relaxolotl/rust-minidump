@@ -1,8 +1,7 @@
 // Copyright 2015 Ted Mielczarek. See the COPYRIGHT
 // file at the top-level directory of this distribution.
 
-use chrono::prelude::*;
-use memmap::Mmap;
+use memmap2::Mmap;
 use minidump::system_info::{Cpu, Os};
 use minidump::*;
 use minidump_common::format as md;
@@ -11,6 +10,7 @@ use num_traits::cast::FromPrimitive;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 fn get_test_minidump_path(filename: &str) -> PathBuf {
     let mut path = PathBuf::from(file!());
@@ -138,8 +138,13 @@ fn test_misc_info() {
     assert_eq!(misc_info.raw.process_id(), Some(&3932));
     assert_eq!(misc_info.raw.process_create_time(), Some(&0x45d35f73));
     assert_eq!(
-        misc_info.process_create_time().unwrap(),
-        Utc.ymd(2007, 2, 14).and_hms(19, 13, 55)
+        misc_info
+            .process_create_time()
+            .unwrap()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        1171480435, // = 2007-02-14T19:13:55
     );
 }
 
@@ -292,5 +297,33 @@ fn test_empty_minidump() {
     match Minidump::read(&b""[..]) {
         Ok(_) => panic!("Should have failed to read minidump"),
         Err(e) => assert_eq!(e, Error::MissingHeader),
+    }
+}
+
+#[test]
+fn backwards_range() {
+    let data = include_bytes!("../../testdata/invalid-range.dmp");
+
+    match Minidump::read(&data[..]) {
+        Ok(f) => {
+            let _ = f.get_stream::<MinidumpLinuxMaps>().unwrap();
+        }
+        Err(e) => {
+            panic!("Expected to parse the header, got {:?}", e);
+        }
+    }
+}
+
+#[test]
+fn test_record_count_mac_info() {
+    let data = include_bytes!("../../testdata/invalid-record-count.dmp");
+
+    match Minidump::read(&data[..]) {
+        Ok(f) => {
+            let _ = f.get_stream::<MinidumpMacCrashInfo>();
+        }
+        Err(e) => {
+            panic!("Expected to parse the header, got {:?}", e);
+        }
     }
 }

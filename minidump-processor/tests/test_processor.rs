@@ -32,7 +32,7 @@ fn locate_testdata() -> PathBuf {
     panic!("Couldn't find testdata directory! Tried: {:?}", paths);
 }
 
-fn read_test_minidump() -> Result<Minidump<'static, memmap::Mmap>, Error> {
+fn read_test_minidump() -> Result<Minidump<'static, memmap2::Mmap>, Error> {
     let path = locate_testdata().join("test.dmp");
     println!("minidump: {:?}", path);
     Minidump::read_path(&path)
@@ -53,9 +53,8 @@ fn test_processor() {
     )
     .unwrap();
     assert_eq!(state.system_info.os, Os::Windows);
-    // TODO
-    // assert_eq!(state.system_info.os_version.unwrap(),
-    // "5.1.2600 Service Pack 2");
+    assert_eq!(state.system_info.os_version.unwrap(), "5.1.2600");
+    assert_eq!(state.system_info.os_build.unwrap(), "Service Pack 2");
     assert_eq!(state.system_info.cpu, Cpu::X86);
     // TODO:
     // assert_eq!(state.system_info.cpu_info.unwrap(),

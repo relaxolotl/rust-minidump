@@ -7,10 +7,10 @@ use std::borrow::{Borrow, Cow};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::io::prelude::*;
+use std::time::SystemTime;
 
 use crate::system_info::SystemInfo;
 use crate::{FrameSymbolizer, SymbolStats};
-use chrono::prelude::*;
 use minidump::system_info::Cpu;
 use minidump::*;
 use serde_json::json;
@@ -156,9 +156,9 @@ pub struct ProcessState {
     /// The PID of the process.
     pub process_id: Option<u32>,
     /// When the minidump was written.
-    pub time: DateTime<Utc>,
+    pub time: SystemTime,
     /// When the process started, if available
-    pub process_create_time: Option<DateTime<Utc>>,
+    pub process_create_time: Option<SystemTime>,
     /// Known code signing certificates (module name => cert name)
     pub cert_info: HashMap<String, String>,
     /// If the process crashed, a `CrashReason` describing the crash reason.
@@ -448,7 +448,7 @@ impl ProcessState {
 
     fn print_internal<T: Write>(&self, f: &mut T, brief: bool) -> io::Result<()> {
         writeln!(f, "Operating system: {}", self.system_info.os.long_name())?;
-        if let Some(ref ver) = self.system_info.os_version {
+        if let Some(ref ver) = self.system_info.format_os_version() {
             writeln!(f, "                  {}", ver)?;
         }
         writeln!(f, "CPU: {}", self.system_info.cpu)?;
@@ -521,8 +521,8 @@ Crash address: {:#x}
             writeln!(f)?;
         }
         if let Some(ref time) = self.process_create_time {
-            let uptime = self.time - *time;
-            writeln!(f, "Process uptime: {} seconds", uptime.num_seconds())?;
+            let uptime = self.time.duration_since(*time).unwrap_or_default();
+            writeln!(f, "Process uptime: {} seconds", uptime.as_secs())?;
         } else {
             writeln!(f, "Process uptime: not available")?;
         }
@@ -668,7 +668,7 @@ Unknown streams encountered:
             "system_info": {
                 // Linux | Windows NT | Mac OS X
                 "os": sys.os.long_name(),
-                "os_ver": sys.os_version,
+                "os_ver": sys.format_os_version(),
                 // x86 | amd64 | arm | ppc | sparc
                 "cpu_arch": sys.cpu.to_string(),
                 "cpu_info": sys.cpu_info,

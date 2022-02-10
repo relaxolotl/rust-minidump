@@ -1,7 +1,6 @@
 // Copyright 2015 Ted Mielczarek. See the COPYRIGHT
 // file at the top-level directory of this distribution.
 
-use failure::format_err;
 use log::warn;
 use nom::IResult::*;
 use nom::*;
@@ -396,20 +395,17 @@ impl SymbolParser {
                     input = new_input;
                     line
                 }
-                Error(e) => {
+                Error(_) => {
                     // The file has a completely corrupt line,
                     // conservatively reject the entire parse.
-                    return Err(SymbolError::ParseError(format_err!(
-                        "Failed to parse file: {}",
-                        e
-                    )));
+                    return Err(SymbolError::ParseError("failed to parse file", self.lines));
                 }
                 Incomplete(_) => {
                     // One of our sub-parsers wants more input, which normally
                     // would be fine for a streaming parser, bust the newline
                     // preprocessing we do means this should never happen.
                     // So Incomplete input is just another kind of parsing Error.
-                    return Err(SymbolError::ParseError(format_err!("Line was incomplete!")));
+                    return Err(SymbolError::ParseError("line was incomplete!", self.lines));
                 }
             };
 
@@ -419,9 +415,10 @@ impl SymbolParser {
                 Line::Module => {
                     // We don't use this but it MUST be the first line
                     if self.lines != 0 {
-                        return Err(SymbolError::ParseError(format_err!(
-                            "MODULE line found after the start of the file"
-                        )));
+                        return Err(SymbolError::ParseError(
+                            "MODULE line found after the start of the file",
+                            self.lines,
+                        ));
                     }
                 }
                 Line::Info(Info::Url(cached_url)) => {
@@ -517,13 +514,12 @@ impl SymbolParser {
                         // Line data from PDB files often has a zero-size line entry, so just
                         // filter those out.
                         if l.size > 0 {
-                            (
-                                Some(Range::new(l.address, l.address + l.size as u64 - 1)),
-                                l,
-                            )
-                        } else {
-                            (None, l)
+                            if let Some(end) = l.address.checked_add(l.size as u64 - 1) {
+                                return (Some(Range::new(l.address, end)), l);
+                            }
                         }
+
+                        (None, l)
                     })
                     .into_rangemap_safe();
 
@@ -1284,4 +1280,13 @@ STACK WIN 4 8d93e 4 4 0 0 10 0 0 1 prog string
             WinStackThing::AllocatesBasePointer(true)
         );
     }
+}
+
+#[test]
+fn address_size_overflow() {
+    let bytes = b"FUNC 1 2 3 x\nffffffffffffffff 2 0 0\n";
+    let sym = parse_symbol_bytes(bytes.as_slice()).unwrap();
+    let fun = sym.functions.get(1).unwrap();
+    assert!(fun.lines.is_empty());
+    assert!(fun.name == "x");
 }

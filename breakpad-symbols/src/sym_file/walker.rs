@@ -737,6 +737,15 @@ enum CfiReg<'a> {
     Other(&'a str),
 }
 
+#[cfg(feature = "fuzz")]
+pub fn eval_win_expr_for_fuzzer(
+    expr: &str,
+    info: &StackInfoWin,
+    walker: &mut dyn FrameWalker,
+) -> Option<()> {
+    eval_win_expr(expr, info, walker)
+}
+
 fn eval_win_expr(expr: &str, info: &StackInfoWin, walker: &mut dyn FrameWalker) -> Option<()> {
     // TODO?: do a bunch of heuristics to make this more robust.
     // So far I haven't encountered an in-the-wild example that needs the
@@ -763,10 +772,10 @@ fn eval_win_expr(expr: &str, info: &StackInfoWin, walker: &mut dyn FrameWalker) 
         // (so the caller's $ebp was pushed right after the return address,
         // and now $ebp points to that.)
         trace!("unwind: program used @ operator, using $ebp instead of $esp for return addr");
-        callee_ebp + 4
+        callee_ebp.checked_add(4)?
     } else {
         // $esp should be reasonable, get the return address from that
-        callee_esp + frame_size
+        callee_esp.checked_add(frame_size)?
     };
 
     trace!(
@@ -788,11 +797,23 @@ fn eval_win_expr(expr: &str, info: &StackInfoWin, walker: &mut dyn FrameWalker) 
     // FIXME: this should be an ArrayVec or something..?
     let mut stack: Vec<WinVal> = Vec::new();
 
-    // FIXME: handle the bug where "= NEXT_TOKEN" is sometimes "=NEXT_TOKEN"
-    // for some windows toolchains. Haven't seen it in the wild yet though!
+    // hack to fix bug where "= NEXT_TOKEN" is sometimes "=NEXT_TOKEN"
+    // for some windows toolchains.
+    let tokens = expr
+        .split_ascii_whitespace()
+        .map(|x| {
+            if x.starts_with('=') && x.len() > 1 {
+                [Some(&x[0..1]), Some(&x[1..])]
+            } else {
+                [Some(x), None]
+            }
+        })
+        .flatten() // get rid of the Array
+        .flatten(); // get rid of the Option::None's
 
     // Evaluate the expressions
-    for token in expr.split_ascii_whitespace() {
+
+    for token in tokens {
         match token {
             // FIXME: not sure what overflow/sign semantics are
             "+" => {
@@ -1366,7 +1387,6 @@ mod test {
     }
 
     #[test]
-    #[ignore]
     fn test_stack_win_equal_fixup() {
         // Bug in old windows toolchains that sometimes cause = to lose
         // its trailing space. Although we would ideally reject this, we're

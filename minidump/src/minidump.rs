@@ -1,12 +1,10 @@
 // Copyright 2015 Ted Mielczarek. See the COPYRIGHT
 // file at the top-level directory of this distribution.
 
-use chrono::prelude::*;
 use encoding::all::UTF_16LE;
 use encoding::{DecoderTrap, Encoding};
-use failure::Fail;
 use log::warn;
-use memmap::Mmap;
+use memmap2::Mmap;
 use num_traits::FromPrimitive;
 use scroll::ctx::{SizeWith, TryFromCtx};
 use scroll::{self, Pread, BE, LE};
@@ -23,14 +21,16 @@ use std::mem;
 use std::ops::Deref;
 use std::path::Path;
 use std::str;
+use std::time::{Duration, SystemTime};
 
 pub use crate::context::*;
 use crate::strings::*;
 use crate::system_info::{Cpu, Os};
-use minidump_common::format as md;
+use minidump_common::format::{self as md, ExceptionCodeLinux};
 use minidump_common::format::{CvSignature, MINIDUMP_STREAM_TYPE};
 use minidump_common::traits::{IntoRangeMapSafe, Module};
 use range_map::{Range, RangeMap};
+use time::format_description::well_known::Rfc3339;
 
 /// An index into the contents of a minidump.
 ///
@@ -67,36 +67,33 @@ where
 }
 
 /// Errors encountered while reading a `Minidump`.
-#[derive(Debug, Fail, PartialEq)]
+#[derive(Debug, thiserror::Error, PartialEq)]
 pub enum Error {
-    #[fail(display = "File not found")]
+    #[error("File not found")]
     FileNotFound,
-    #[fail(display = "I/O error")]
+    #[error("I/O error")]
     IoError,
-    #[fail(display = "Missing minidump header (empty minidump?)")]
+    #[error("Missing minidump header (empty minidump?)")]
     MissingHeader,
-    #[fail(display = "Header mismatch")]
+    #[error("Header mismatch")]
     HeaderMismatch,
-    #[fail(display = "Minidump version mismatch")]
+    #[error("Minidump version mismatch")]
     VersionMismatch,
-    #[fail(display = "Missing stream directory (heavily truncated minidump?)")]
+    #[error("Missing stream directory (heavily truncated minidump?)")]
     MissingDirectory,
-    #[fail(display = "Error reading stream")]
+    #[error("Error reading stream")]
     StreamReadFailure,
-    #[fail(
-        display = "Stream size mismatch: expected {} bytes, found {} bytes",
-        expected, actual
-    )]
+    #[error("Stream size mismatch: expected {expected} bytes, found {actual} bytes")]
     StreamSizeMismatch { expected: usize, actual: usize },
-    #[fail(display = "Stream not found")]
+    #[error("Stream not found")]
     StreamNotFound,
-    #[fail(display = "Module read failure")]
+    #[error("Module read failure")]
     ModuleReadFailure,
-    #[fail(display = "Memory read failure")]
+    #[error("Memory read failure")]
     MemoryReadFailure,
-    #[fail(display = "Data error")]
+    #[error("Data error")]
     DataError,
-    #[fail(display = "Error reading CodeView data")]
+    #[error("Error reading CodeView data")]
     CodeViewReadFailure,
 }
 
@@ -440,13 +437,16 @@ pub enum CrashReason {
     MacBreakpointPpc(md::ExceptionCodeMacBreakpointPpcType),
     MacBreakpointX86(md::ExceptionCodeMacBreakpointX86Type),
     MacResource(md::ExceptionCodeMacResourceType, u64, u64),
+    MacGuard(md::ExceptionCodeMacGuardType, u64, u64),
 
     /// A Linux/Android error code with no other interesting metadata.
     LinuxGeneral(md::ExceptionCodeLinux, u32),
     LinuxSigill(md::ExceptionCodeLinuxSigillKind),
+    LinuxSigtrap(md::ExceptionCodeLinuxSigtrapKind),
     LinuxSigbus(md::ExceptionCodeLinuxSigbusKind),
     LinuxSigfpe(md::ExceptionCodeLinuxSigfpeKind),
     LinuxSigsegv(md::ExceptionCodeLinuxSigsegvKind),
+    LinuxSigsys(md::ExceptionCodeLinuxSigsysKind),
 
     /// A Windows error code with no other interesting metadata.
     WindowsGeneral(md::ExceptionCodeWindows),
@@ -556,29 +556,30 @@ pub struct MinidumpCrashpadInfo {
 // Implementations
 
 fn format_time_t(t: u32) -> String {
-    if let Some(datetime) = NaiveDateTime::from_timestamp_opt(t as i64, 0) {
-        datetime.format("%Y-%m-%d %H:%M:%S").to_string()
-    } else {
-        String::new()
-    }
+    time::OffsetDateTime::from_unix_timestamp(t as i64)
+        .ok()
+        .and_then(|datetime| datetime.format(&Rfc3339).ok())
+        .unwrap_or_default()
 }
 
 fn format_system_time(time: &md::SYSTEMTIME) -> String {
     // Note this drops the day_of_week field on the ground -- is that fine?
-    if let Some(date) =
-        NaiveDate::from_ymd_opt(time.year as i32, time.month as u32, time.day as u32)
-    {
-        let time = NaiveTime::from_hms_milli(
-            time.hour as u32,
-            time.minute as u32,
-            time.second as u32,
-            time.milliseconds as u32,
-        );
-        let datetime = NaiveDateTime::new(date, time);
-        datetime.format("%Y-%m-%d %H:%M:%S:%f").to_string()
-    } else {
-        "<invalid date>".to_owned()
-    }
+    let format_date = || {
+        use std::convert::TryFrom;
+        let month = time::Month::try_from(time.month as u8).ok()?;
+        let date = time::Date::from_calendar_date(time.year as i32, month, time.day as u8).ok()?;
+        let datetime = date
+            .with_hms_milli(
+                time.hour as u8,
+                time.minute as u8,
+                time.second as u8,
+                time.milliseconds,
+            )
+            .ok()?
+            .assume_utc();
+        datetime.format(&Rfc3339).ok()
+    };
+    format_date().unwrap_or_else(|| "<invalid date>".to_owned())
 }
 
 /// Produce a slice of `bytes` corresponding to the offset and size in `loc`, or an
@@ -595,23 +596,17 @@ fn location_slice<'a>(
 }
 
 /// Read a u32 length-prefixed UTF-16 string from `bytes` at `offset`.
-fn read_string_utf16(
-    offset: &mut usize,
-    bytes: &[u8],
-    endian: scroll::Endian,
-) -> Result<String, ()> {
-    let u: u32 = bytes.gread_with(offset, endian).or(Err(()))?;
+fn read_string_utf16(offset: &mut usize, bytes: &[u8], endian: scroll::Endian) -> Option<String> {
+    let u: u32 = bytes.gread_with(offset, endian).ok()?;
     let size = u as usize;
     if size % 2 != 0 || (*offset + size) > bytes.len() {
-        return Err(());
+        return None;
     }
-    match UTF_16LE.decode(&bytes[*offset..*offset + size], DecoderTrap::Strict) {
-        Ok(s) => {
-            *offset += size;
-            Ok(s)
-        }
-        Err(_) => Err(()),
-    }
+    let s = UTF_16LE
+        .decode(&bytes[*offset..*offset + size], DecoderTrap::Strict)
+        .ok()?;
+    *offset += size;
+    Some(s)
 }
 
 #[inline]
@@ -619,35 +614,35 @@ fn read_string_utf8_unterminated<'a>(
     offset: &mut usize,
     bytes: &'a [u8],
     endian: scroll::Endian,
-) -> Result<&'a str, ()> {
-    let length: u32 = bytes.gread_with(offset, endian).or(Err(()))?;
-    let slice = bytes.gread_with(offset, length as usize).or(Err(()))?;
-    std::str::from_utf8(slice).or(Err(()))
+) -> Option<&'a str> {
+    let length: u32 = bytes.gread_with(offset, endian).ok()?;
+    let slice = bytes.gread_with(offset, length as usize).ok()?;
+    std::str::from_utf8(slice).ok()
 }
 
 fn read_string_utf8<'a>(
     offset: &mut usize,
     bytes: &'a [u8],
     endian: scroll::Endian,
-) -> Result<&'a str, ()> {
+) -> Option<&'a str> {
     let string = read_string_utf8_unterminated(offset, bytes, endian)?;
     match bytes.gread(offset) {
-        Ok(0u8) => Ok(string),
-        _ => Err(()),
+        Ok(0u8) => Some(string),
+        _ => None,
     }
 }
 
-fn read_cstring_utf8(offset: &mut usize, bytes: &[u8]) -> Result<String, ()> {
+fn read_cstring_utf8(offset: &mut usize, bytes: &[u8]) -> Option<String> {
     let initial_offset = *offset;
     loop {
-        let byte: u8 = bytes.gread(offset).or(Err(()))?;
+        let byte: u8 = bytes.gread(offset).ok()?;
         if byte == 0 {
             break;
         }
     }
     std::str::from_utf8(&bytes[initial_offset..*offset - 1])
         .map(String::from)
-        .or(Err(()))
+        .ok()
 }
 
 /// Convert `bytes` with trailing NUL characters to a string
@@ -666,20 +661,43 @@ fn read_codeview(
     location: &md::MINIDUMP_LOCATION_DESCRIPTOR,
     data: &[u8],
     endian: scroll::Endian,
-) -> Result<CodeView, failure::Error> {
-    let bytes = location_slice(data, location)?;
+) -> Option<CodeView> {
+    let bytes = location_slice(data, location).ok()?;
     // The CodeView data can be one of a few different formats. Try to read the
     // signature first to figure out what format the data is.
-    let signature: u32 = bytes.pread_with(0, endian)?;
-    Ok(match CvSignature::from_u32(signature) {
+    let signature: u32 = bytes.pread_with(0, endian).ok()?;
+    Some(match CvSignature::from_u32(signature) {
         // PDB data has two known versions: the current 7.0 and the older 2.0 version.
-        Some(CvSignature::Pdb70) => CodeView::Pdb70(bytes.pread_with(0, endian)?),
-        Some(CvSignature::Pdb20) => CodeView::Pdb20(bytes.pread_with(0, endian)?),
+        Some(CvSignature::Pdb70) => CodeView::Pdb70(bytes.pread_with(0, endian).ok()?),
+        Some(CvSignature::Pdb20) => CodeView::Pdb20(bytes.pread_with(0, endian).ok()?),
         // Breakpad's ELF build ID format.
-        Some(CvSignature::Elf) => CodeView::Elf(bytes.pread_with(0, endian)?),
+        Some(CvSignature::Elf) => CodeView::Elf(bytes.pread_with(0, endian).ok()?),
         // Other formats aren't handled, but save the raw bytes.
         _ => CodeView::Unknown(bytes.to_owned()),
     })
+}
+
+/// Checks that the buffer is large enough for the given number of items.
+///
+/// Essentially ensures that `buf.len() >= offset + (number_of_entries * size_of_entry)`.
+/// Returns `(number_of_entries, expected_size)` on success.
+fn ensure_count_in_bound(
+    buf: &[u8],
+    number_of_entries: usize,
+    size_of_entry: usize,
+    offset: usize,
+) -> Result<(usize, usize), Error> {
+    let expected_size = number_of_entries
+        .checked_mul(size_of_entry)
+        .and_then(|v| v.checked_add(offset))
+        .ok_or(Error::StreamReadFailure)?;
+    if buf.len() < expected_size {
+        return Err(Error::StreamSizeMismatch {
+            expected: expected_size,
+            actual: buf.len(),
+        });
+    }
+    Ok((number_of_entries, expected_size))
 }
 
 impl MinidumpModule {
@@ -708,11 +726,11 @@ impl MinidumpModule {
     ) -> Result<MinidumpModule, Error> {
         let mut offset = raw.module_name_rva as usize;
         let name =
-            read_string_utf16(&mut offset, bytes, endian).or(Err(Error::CodeViewReadFailure))?;
+            read_string_utf16(&mut offset, bytes, endian).ok_or(Error::CodeViewReadFailure)?;
         let codeview_info = if raw.cv_record.data_size == 0 {
             None
         } else {
-            Some(read_codeview(&raw.cv_record, bytes, endian).or(Err(Error::CodeViewReadFailure))?)
+            Some(read_codeview(&raw.cv_record, bytes, endian).ok_or(Error::CodeViewReadFailure)?)
         };
         Ok(MinidumpModule {
             raw,
@@ -984,7 +1002,7 @@ impl MinidumpUnloadedModule {
         endian: scroll::Endian,
     ) -> Result<MinidumpUnloadedModule, Error> {
         let mut offset = raw.module_name_rva as usize;
-        let name = read_string_utf16(&mut offset, bytes, endian).or(Err(Error::DataError))?;
+        let name = read_string_utf16(&mut offset, bytes, endian).ok_or(Error::DataError)?;
         Ok(MinidumpUnloadedModule { raw, name })
     }
 
@@ -1091,20 +1109,14 @@ where
     let u: u32 = bytes
         .gread_with(offset, endian)
         .or(Err(Error::StreamReadFailure))?;
-    let count = u as usize;
-    let counted_size = match count
-        .checked_mul(<T>::size_with(&endian))
-        .and_then(|v| v.checked_add(mem::size_of::<u32>()))
-    {
-        Some(s) => s,
-        None => return Err(Error::StreamReadFailure),
-    };
-    if bytes.len() < counted_size {
-        return Err(Error::StreamSizeMismatch {
-            expected: counted_size,
-            actual: bytes.len(),
-        });
-    }
+
+    let (count, counted_size) = ensure_count_in_bound(
+        bytes,
+        u as usize,
+        <T>::size_with(&endian),
+        mem::size_of::<u32>(),
+    )?;
+
     match bytes.len() - counted_size {
         0 => {}
         4 => {
@@ -1171,19 +1183,13 @@ where
         return Err(Error::StreamReadFailure);
     }
 
-    let stream_size = match number_of_entries
-        .checked_mul(size_of_entry)
-        .and_then(|v| v.checked_add(size_of_header))
-    {
-        Some(s) => s as usize,
-        None => return Err(Error::StreamReadFailure),
-    };
-    if bytes.len() < stream_size {
-        return Err(Error::StreamSizeMismatch {
-            expected: stream_size,
-            actual: bytes.len(),
-        });
-    }
+    let (number_of_entries, _) = ensure_count_in_bound(
+        bytes,
+        number_of_entries as usize,
+        size_of_entry as usize,
+        size_of_header as usize,
+    )?;
+
     let header_padding = match (size_of_header as usize).checked_sub(*offset) {
         Some(s) => s,
         None => return Err(Error::StreamReadFailure),
@@ -1213,7 +1219,7 @@ impl<'a> MinidumpStream<'a> for MinidumpThreadNames {
         for raw_name in raw_names {
             let mut offset = raw_name.thread_name_rva as usize;
             // Better to just drop unreadable names individually than the whole stream.
-            if let Ok(name) = read_string_utf16(&mut offset, all, endian) {
+            if let Some(name) = read_string_utf16(&mut offset, all, endian) {
                 names.insert(raw_name.thread_id, name);
             } else {
                 warn!(
@@ -1495,7 +1501,9 @@ impl<'a> MinidumpMemory<'a> {
         T: TryFromCtx<'a, scroll::Endian, [u8], Error = scroll::Error>,
         T: SizeWith<scroll::Endian>,
     {
-        let in_range = |a: u64| a >= self.base_address && a < (self.base_address + self.size);
+        let end = self.base_address.checked_add(self.size)?;
+
+        let in_range = |a: u64| a >= self.base_address && a < end;
         let size = <T>::size_with(&LE);
         if !in_range(addr) || !in_range(addr + size as u64 - 1) {
             return None;
@@ -2065,7 +2073,7 @@ impl<'a> MinidumpLinuxMapInfo<'a> {
 
     pub fn memory_range(&self) -> Option<Range<u64>> {
         // final address is inclusive afaik
-        if self.base_address < self.final_address {
+        if self.base_address > self.final_address {
             return None;
         }
         Some(Range::new(self.base_address, self.final_address))
@@ -2394,7 +2402,7 @@ impl<'a> MinidumpStream<'a> for MinidumpSystemInfo {
         let cpu = Cpu::from_processor_architecture(raw.processor_architecture);
 
         let mut csd_offset = raw.csd_version_rva as usize;
-        let csd_version = read_string_utf16(&mut csd_offset, all, endian).ok();
+        let csd_version = read_string_utf16(&mut csd_offset, all, endian);
 
         // self.raw.cpu.data is actually a union which we resolve here.
         let cpu_info = match cpu {
@@ -2852,7 +2860,12 @@ impl<'a> MinidumpStream<'a> for MinidumpMacCrashInfo {
         let strings_offset = header.record_start_size as usize;
         let mut prev_version = None;
         let mut infos = Vec::new();
-        for record_location in &header.records[..header.record_count as usize] {
+
+        // We use `take` here to better handle a corrupt record_count that is larger than the
+        // maximum supported size.
+        let records = header.records.iter().take(header.record_count as usize);
+
+        for record_location in records {
             // Peek the V1 version to get the `version` field
             let record_slice = location_slice(all, record_location)?;
             let base: md::MINIDUMP_MAC_CRASH_INFO_RECORD = record_slice
@@ -2908,7 +2921,7 @@ impl<'a> MinidumpStream<'a> for MinidumpMacCrashInfo {
                         // Read out all the strings we know about
                         for i in 0..num_strings {
                             let string = read_cstring_utf8(offset, record_slice)
-                                .or(Err(Error::StreamReadFailure))?;
+                                .ok_or(Error::StreamReadFailure)?;
                             strings.set_string(i, string);
                         }
                         // If this is a newer version, there may be some extra variable length
@@ -3062,11 +3075,15 @@ impl<'a> MinidumpLinuxLsbRelease<'a> {
     }
 }
 
+fn systemtime_from_timestamp(timestamp: u64) -> Option<SystemTime> {
+    SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(timestamp))
+}
+
 impl MinidumpMiscInfo {
-    pub fn process_create_time(&self) -> Option<DateTime<Utc>> {
+    pub fn process_create_time(&self) -> Option<SystemTime> {
         self.raw
             .process_create_time()
-            .map(|t| Utc.timestamp(*t as i64, 0))
+            .and_then(|t| systemtime_from_timestamp(*t as u64))
     }
 
     /// Write a human-readable description of this `MinidumpMiscInfo` to `f`.
@@ -3486,6 +3503,13 @@ impl CrashReason {
                     reason = CrashReason::MacResource(ty, info[1], info[2]);
                 }
             }
+            ExceptionCodeMac::EXC_GUARD => {
+                if let Some(ty) =
+                    md::ExceptionCodeMacGuardType::from_u32((exception_flags >> 29) & 0x7)
+                {
+                    reason = CrashReason::MacGuard(ty, info[1], info[2]);
+                }
+            }
             _ => {
                 // Do nothing
             }
@@ -3497,8 +3521,6 @@ impl CrashReason {
         raw: &md::MINIDUMP_EXCEPTION_STREAM,
         _cpu: Cpu,
     ) -> Option<CrashReason> {
-        use md::ExceptionCodeLinux;
-
         let record = &raw.exception_record;
         let exception_code = record.exception_code;
         let exception_flags = record.exception_flags;
@@ -3510,6 +3532,11 @@ impl CrashReason {
             ExceptionCodeLinux::SIGILL => {
                 if let Some(ty) = md::ExceptionCodeLinuxSigillKind::from_u32(exception_flags) {
                     reason = CrashReason::LinuxSigill(ty);
+                }
+            }
+            ExceptionCodeLinux::SIGTRAP => {
+                if let Some(ty) = md::ExceptionCodeLinuxSigtrapKind::from_u32(exception_flags) {
+                    reason = CrashReason::LinuxSigtrap(ty);
                 }
             }
             ExceptionCodeLinux::SIGFPE => {
@@ -3525,6 +3552,11 @@ impl CrashReason {
             ExceptionCodeLinux::SIGBUS => {
                 if let Some(ty) = md::ExceptionCodeLinuxSigbusKind::from_u32(exception_flags) {
                     reason = CrashReason::LinuxSigbus(ty);
+                }
+            }
+            ExceptionCodeLinux::SIGSYS => {
+                if let Some(ty) = md::ExceptionCodeLinuxSigsysKind::from_u32(exception_flags) {
+                    reason = CrashReason::LinuxSigsys(ty);
                 }
             }
             _ => {
@@ -3650,6 +3682,92 @@ impl fmt::Display for CrashReason {
             }
         }
 
+        fn write_exc_guard(
+            f: &mut fmt::Formatter<'_>,
+            ex: md::ExceptionCodeMacGuardType,
+            code: u64,
+            subcode: u64,
+        ) -> fmt::Result {
+            let flavor = (code >> 32) & 0x1fffffff;
+            write!(f, "EXC_GUARD / {:?}", ex)?;
+            match ex {
+                md::ExceptionCodeMacGuardType::GUARD_TYPE_NONE => {
+                    write!(f, "")
+                }
+                md::ExceptionCodeMacGuardType::GUARD_TYPE_MACH_PORT => {
+                    if let Some(mach_port_flavor) =
+                        md::ExceptionCodeMacGuardMachPortFlavor::from_u64(flavor)
+                    {
+                        let port_name = code & 0xfffffff;
+                        write!(
+                            f,
+                            " / {:?} port name: {} guard identifier: {}",
+                            mach_port_flavor, port_name, subcode,
+                        )
+                    } else {
+                        write!(f, " / 0x{:016} / 0x{:016}", code, subcode)
+                    }
+                }
+                md::ExceptionCodeMacGuardType::GUARD_TYPE_FD => {
+                    if let Some(fd_flavor) = md::ExceptionCodeMacGuardFDFlavor::from_u64(flavor) {
+                        let fd = code & 0xfffffff;
+                        write!(
+                            f,
+                            " / {:?} file descriptor: {} guard identifier: {}",
+                            fd_flavor, fd, subcode,
+                        )
+                    } else {
+                        write!(f, " / 0x{:016} / 0x{:016}", code, subcode)
+                    }
+                }
+                md::ExceptionCodeMacGuardType::GUARD_TYPE_USER => {
+                    let namespace = code & 0xffffffff;
+                    write!(
+                        f,
+                        "/ namespace: {} guard identifier: {}",
+                        namespace, subcode,
+                    )
+                }
+                md::ExceptionCodeMacGuardType::GUARD_TYPE_VN => {
+                    if let Some(vn_flavor) = md::ExceptionCodeMacGuardVNFlavor::from_u64(flavor) {
+                        let pid = code & 0xfffffff;
+                        write!(
+                            f,
+                            " / {:?} pid: {} guard identifier: {}",
+                            vn_flavor, pid, subcode,
+                        )
+                    } else {
+                        write!(f, " / 0x{:016} / 0x{:016}", code, subcode)
+                    }
+                }
+                md::ExceptionCodeMacGuardType::GUARD_TYPE_VIRT_MEMORY => {
+                    if let Some(virt_memory_flavor) =
+                        md::ExceptionCodeMacGuardVirtMemoryFlavor::from_u64(flavor)
+                    {
+                        write!(f, " / {:?} offset: {}", virt_memory_flavor, subcode)
+                    } else {
+                        write!(f, " / 0x{:016} / 0x{:016}", code, subcode)
+                    }
+                }
+            }
+        }
+
+        fn write_signal(
+            f: &mut fmt::Formatter<'_>,
+            ex: ExceptionCodeLinux,
+            flags: u32,
+        ) -> fmt::Result {
+            if let Some(si_code) = md::ExceptionCodeLinuxSicode::from_u32(flags) {
+                if si_code == md::ExceptionCodeLinuxSicode::SI_USER {
+                    write!(f, "{:?}", ex)
+                } else {
+                    write!(f, "{:?} / {:?}", ex, si_code)
+                }
+            } else {
+                write!(f, "{:?} / 0x{:08x}", ex, flags)
+            }
+        }
+
         // OK this is kinda a gross hack but I *really* don't want
         // to write out all these strings again, so let's just lean on Debug
         // repeating the name of the enum variant!
@@ -3675,15 +3793,18 @@ impl fmt::Display for CrashReason {
             MacBreakpointPpc(ex) => write!(f, "EXC_BREAKPOINT / {:?}", ex),
             MacBreakpointX86(ex) => write!(f, "EXC_BREAKPOINT / {:?}", ex),
             MacResource(ex, code, subcode) => write_exc_resource(f, ex, code, subcode),
+            MacGuard(ex, code, subcode) => write_exc_guard(f, ex, code, subcode),
 
             // ===================== Linux/Android =========================
 
             // These codes just repeat their names
-            LinuxGeneral(ex, flags) => write!(f, "{:?} / 0x{:08x}", ex, flags),
+            LinuxGeneral(ex, flags) => write_signal(f, ex, flags),
             LinuxSigill(ex) => write!(f, "SIGILL / {:?}", ex),
+            LinuxSigtrap(ex) => write!(f, "SIGTRAP / {:?}", ex),
             LinuxSigbus(ex) => write!(f, "SIGBUS / {:?}", ex),
             LinuxSigfpe(ex) => write!(f, "SIGFPE / {:?}", ex),
             LinuxSigsegv(ex) => write!(f, "SIGSEGV / {:?}", ex),
+            LinuxSigsys(ex) => write!(f, "SIGSYS / {:?}", ex),
 
             // ======================== Windows =============================
 
@@ -3947,14 +4068,16 @@ fn read_string_list(
         .gread_with(&mut offset, endian)
         .or(Err(Error::StreamReadFailure))?;
 
-    let mut strings = Vec::with_capacity(count as usize);
+    let (count, _) = ensure_count_in_bound(all, count as usize, <md::RVA>::size_with(&endian), 0)?;
+
+    let mut strings = Vec::with_capacity(count);
     for _ in 0..count {
         let rva: md::RVA = data
             .gread_with(&mut offset, endian)
             .or(Err(Error::StreamReadFailure))?;
 
         let string = read_string_utf8(&mut (rva as usize), all, endian)
-            .or(Err(Error::StreamReadFailure))?
+            .ok_or(Error::StreamReadFailure)?
             .to_owned();
 
         strings.push(string);
@@ -3987,9 +4110,9 @@ fn read_simple_string_dictionary(
             .or(Err(Error::StreamReadFailure))?;
 
         let key = read_string_utf8(&mut (entry.key as usize), all, endian)
-            .or(Err(Error::StreamReadFailure))?;
+            .ok_or(Error::StreamReadFailure)?;
         let value = read_string_utf8(&mut (entry.value as usize), all, endian)
-            .or(Err(Error::StreamReadFailure))?;
+            .ok_or(Error::StreamReadFailure)?;
 
         dictionary.insert(key.to_owned(), value.to_owned());
     }
@@ -4021,13 +4144,13 @@ fn read_annotation_objects(
             .or(Err(Error::StreamReadFailure))?;
 
         let key = read_string_utf8(&mut (raw.name as usize), all, endian)
-            .or(Err(Error::StreamReadFailure))?;
+            .ok_or(Error::StreamReadFailure)?;
 
         let value = match raw.ty {
             md::MINIDUMP_ANNOTATION::TYPE_INVALID => MinidumpAnnotation::Invalid,
             md::MINIDUMP_ANNOTATION::TYPE_STRING => {
                 let string = read_string_utf8_unterminated(&mut (raw.value as usize), all, endian)
-                    .or(Err(Error::StreamReadFailure))?
+                    .ok_or(Error::StreamReadFailure)?
                     .to_owned();
 
                 MinidumpAnnotation::String(string)
@@ -4085,7 +4208,14 @@ fn read_crashpad_module_links(
         .gread_with(&mut offset, endian)
         .or(Err(Error::StreamReadFailure))?;
 
-    let mut module_links = Vec::with_capacity(count as usize);
+    let (count, _) = ensure_count_in_bound(
+        all,
+        count as usize,
+        <md::MINIDUMP_MODULE_CRASHPAD_INFO_LINK>::size_with(&endian),
+        0,
+    )?;
+
+    let mut module_links = Vec::with_capacity(count);
     for _ in 0..count {
         let link: md::MINIDUMP_MODULE_CRASHPAD_INFO_LINK = data
             .gread_with(&mut offset, endian)
@@ -4263,8 +4393,17 @@ where
         if (header.version & 0x0000ffff) != md::MINIDUMP_VERSION {
             return Err(Error::VersionMismatch);
         }
-        let mut streams = HashMap::with_capacity(header.stream_count as usize);
+
         offset = header.stream_directory_rva as usize;
+
+        let (count, _) = ensure_count_in_bound(
+            &data,
+            header.stream_count as usize,
+            <md::MINIDUMP_DIRECTORY>::size_with(&endian),
+            offset,
+        )?;
+
+        let mut streams = HashMap::with_capacity(count);
         for i in 0..header.stream_count {
             let dir: md::MINIDUMP_DIRECTORY = data
                 .gread_with(&mut offset, endian)
@@ -4886,6 +5025,11 @@ c70206ca83eb2852-de0206ca83eb2852  -w-s  10bac9000 fd:05 1196511 /usr/lib64/libt
         assert!(!maps[1].is_private);
         assert!(maps[1].is_shared);
         assert!(!maps[1].is_executable());
+
+        let mut unified_infos = unified_info.by_addr();
+
+        assert!(matches!(unified_infos.next(), Some(UnifiedMemoryInfo::Map(m)) if m == maps[0]));
+        assert!(matches!(unified_infos.next(), Some(UnifiedMemoryInfo::Map(m)) if m == maps[1]));
     }
 
     #[test]
@@ -4906,6 +5050,7 @@ c70206ca83eb2852-de0206ca83eb2852  -w-s  10bac9000 fd:05 1196511 /usr/lib64/libt
 
             assert_eq!(map.base_address, 0x10a00);
             assert_eq!(map.final_address, 0x10b00);
+            assert_eq!(map.memory_range(), Some(Range::new(0x10a00, 0x10b00)));
             assert_eq!(
                 map.kind,
                 File(Cow::Borrowed(LinuxOsStr::from_bytes(
@@ -4929,6 +5074,10 @@ c70206ca83eb2852-de0206ca83eb2852  -w-s  10bac9000 fd:05 1196511 /usr/lib64/libt
             assert_eq!(map.base_address, 0xffffffffff600000);
             assert_eq!(map.final_address, 0xffffffffff601000);
             assert_eq!(
+                map.memory_range(),
+                Some(Range::new(0xffffffffff600000, 0xffffffffff601000))
+            );
+            assert_eq!(
                 map.kind,
                 DeletedFile(Cow::Borrowed(LinuxOsStr::from_bytes(
                     b"/usr/lib64/ libtdb1.so"
@@ -4950,6 +5099,7 @@ c70206ca83eb2852-de0206ca83eb2852  -w-s  10bac9000 fd:05 1196511 /usr/lib64/libt
 
             assert_eq!(map.base_address, 0x10a00);
             assert_eq!(map.final_address, 0x10b00);
+            assert_eq!(map.memory_range(), Some(Range::new(0x10a00, 0x10b00)));
             assert_eq!(map.kind, MainThreadStack);
 
             assert!(!map.is_read);
@@ -4967,6 +5117,7 @@ c70206ca83eb2852-de0206ca83eb2852  -w-s  10bac9000 fd:05 1196511 /usr/lib64/libt
 
             assert_eq!(map.base_address, 0x10a00);
             assert_eq!(map.final_address, 0x10b00);
+            assert_eq!(map.memory_range(), Some(Range::new(0x10a00, 0x10b00)));
             assert_eq!(map.kind, Stack(1234567));
 
             assert!(!map.is_read);
@@ -4984,6 +5135,7 @@ c70206ca83eb2852-de0206ca83eb2852  -w-s  10bac9000 fd:05 1196511 /usr/lib64/libt
 
             assert_eq!(map.base_address, 0x10a00);
             assert_eq!(map.final_address, 0x10b00);
+            assert_eq!(map.memory_range(), Some(Range::new(0x10a00, 0x10b00)));
             assert_eq!(map.kind, Heap);
 
             assert!(!map.is_read);
@@ -5001,6 +5153,7 @@ c70206ca83eb2852-de0206ca83eb2852  -w-s  10bac9000 fd:05 1196511 /usr/lib64/libt
 
             assert_eq!(map.base_address, 0x10a00);
             assert_eq!(map.final_address, 0x10b00);
+            assert_eq!(map.memory_range(), Some(Range::new(0x10a00, 0x10b00)));
             assert_eq!(map.kind, Vdso);
 
             assert!(map.is_read);
@@ -5018,6 +5171,7 @@ c70206ca83eb2852-de0206ca83eb2852  -w-s  10bac9000 fd:05 1196511 /usr/lib64/libt
 
             assert_eq!(map.base_address, 0x10a00);
             assert_eq!(map.final_address, 0x10b00);
+            assert_eq!(map.memory_range(), Some(Range::new(0x10a00, 0x10b00)));
             assert_eq!(
                 map.kind,
                 UnknownSpecial(Cow::Borrowed(LinuxOsStr::from_bytes(b"[asdfasd]")))
@@ -5038,6 +5192,7 @@ c70206ca83eb2852-de0206ca83eb2852  -w-s  10bac9000 fd:05 1196511 /usr/lib64/libt
 
             assert_eq!(map.base_address, 0x10a00);
             assert_eq!(map.final_address, 0x10b00);
+            assert_eq!(map.memory_range(), Some(Range::new(0x10a00, 0x10b00)));
             assert_eq!(map.kind, AnonymousMap);
 
             assert!(map.is_read);
@@ -5055,6 +5210,7 @@ c70206ca83eb2852-de0206ca83eb2852  -w-s  10bac9000 fd:05 1196511 /usr/lib64/libt
 
             assert_eq!(map.base_address, 0x10a00);
             assert_eq!(map.final_address, 0x10b00);
+            assert_eq!(map.memory_range(), Some(Range::new(0x10a00, 0x10b00)));
             assert_eq!(map.kind, AnonymousMap);
 
             assert!(!map.is_read);
@@ -5063,6 +5219,26 @@ c70206ca83eb2852-de0206ca83eb2852  -w-s  10bac9000 fd:05 1196511 /usr/lib64/libt
             assert!(!map.is_executable());
             assert!(!map.is_private);
             assert!(!map.is_shared);
+        }
+
+        {
+            // Reversed ranges result in None for memory_range()
+            let map = parse(b"fffff-10000");
+            let map = map.unwrap();
+
+            assert_eq!(map.base_address, 0xfffff);
+            assert_eq!(map.final_address, 0x10000);
+            assert_eq!(map.memory_range(), None);
+        }
+
+        {
+            // Equal ranges are valid
+            let map = parse(b"fffff-fffff");
+            let map = map.unwrap();
+
+            assert_eq!(map.base_address, 0xfffff);
+            assert_eq!(map.final_address, 0xfffff);
+            assert_eq!(map.memory_range(), Some(Range::new(0xfffff, 0xfffff)));
         }
 
         {
@@ -5251,6 +5427,20 @@ c70206ca83eb2852-de0206ca83eb2852  -w-s  10bac9000 fd:05 1196511 /usr/lib64/libt
     }
 
     #[test]
+    fn test_memory_overflow() {
+        let memory1 = Memory::with_section(
+            Section::with_endian(Endian::Little).append_repeated(0, 2),
+            u64::MAX,
+        );
+        let dump = SynthMinidump::with_endian(Endian::Little).add_memory(memory1);
+        let dump = read_synth_dump(dump).unwrap();
+        let memory_list = dump.get_stream::<MinidumpMemoryList<'_>>().unwrap();
+        let regions = memory_list.iter().collect::<Vec<_>>();
+        assert_eq!(regions.len(), 1);
+        assert!(regions[0].get_memory_at_address::<u8>(u64::MAX).is_none());
+    }
+
+    #[test]
     fn test_memory_list_overlap() {
         let memory1 = Memory::with_section(
             Section::with_endian(Endian::Little).append_repeated(0, 0x1000),
@@ -5327,7 +5517,7 @@ c70206ca83eb2852-de0206ca83eb2852  -w-s  10bac9000 fd:05 1196511 /usr/lib64/libt
         assert_eq!(misc.raw.process_id(), Some(&PID));
         assert_eq!(
             misc.process_create_time().unwrap(),
-            Utc.timestamp(PROCESS_TIMES.process_create_time as i64, 0)
+            systemtime_from_timestamp(PROCESS_TIMES.process_create_time as u64).unwrap()
         );
         assert_eq!(
             *misc.raw.process_user_time().unwrap(),
@@ -5358,7 +5548,7 @@ c70206ca83eb2852-de0206ca83eb2852  -w-s  10bac9000 fd:05 1196511 /usr/lib64/libt
         assert_eq!(misc.raw.process_id(), Some(&PID));
         assert_eq!(
             misc.process_create_time().unwrap(),
-            Utc.timestamp(PROCESS_TIMES.process_create_time as i64, 0)
+            systemtime_from_timestamp(PROCESS_TIMES.process_create_time as u64).unwrap(),
         );
         assert_eq!(
             *misc.raw.process_user_time().unwrap(),
@@ -5504,7 +5694,7 @@ c70206ca83eb2852-de0206ca83eb2852  -w-s  10bac9000 fd:05 1196511 /usr/lib64/libt
         assert_eq!(misc.raw.process_id(), Some(&PID));
         assert_eq!(
             misc.process_create_time().unwrap(),
-            Utc.timestamp(PROCESS_TIMES.process_create_time as i64, 0)
+            systemtime_from_timestamp(PROCESS_TIMES.process_create_time as u64).unwrap()
         );
         assert_eq!(
             *misc.raw.process_user_time().unwrap(),
@@ -5846,5 +6036,16 @@ c70206ca83eb2852-de0206ca83eb2852  -w-s  10bac9000 fd:05 1196511 /usr/lib64/libt
             exception_stream.get_crash_address(system_stream.os, system_stream.cpu),
             0xf0e1_d2c3_b4a5_9687
         );
+    }
+
+    #[test]
+    fn test_fuzzed_oom() {
+        // https://github.com/luser/rust-minidump/issues/381
+        let data = b"MDMP\x93\xa7\x00\x00\x00\xffffdYfffff@\n\nfp\n\xbb\xff\xff\xff\n\xff\n";
+        assert!(Minidump::read(data.as_ref()).is_err());
+
+        // https://github.com/getsentry/symbolic/issues/478
+        let data = b"MDMP\x93\xa7\x00\x00\r\x00\x00\x00 \xff\xff\xff\xff\xff\xff\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+        assert!(Minidump::read(data.as_ref()).is_err());
     }
 }
