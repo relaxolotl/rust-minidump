@@ -74,9 +74,10 @@ pub trait CpuContext {
     fn set_register(&mut self, reg: &str, val: Self::Register) -> Option<()>;
 
     /// Gets a static version of the given register name, if possible.
+    ///
+    /// Returns the default name of the register for register name aliases.
     fn memoize_register(&self, reg: &str) -> Option<&'static str> {
-        let idx = Self::REGISTERS.iter().position(|val| *val == reg)?;
-        Some(Self::REGISTERS[idx])
+        default_memoize_register(Self::REGISTERS, reg)
     }
 
     /// Return a String containing the value of `reg` formatted to its natural width.
@@ -116,6 +117,12 @@ pub trait CpuContext {
 
     /// Gets the name of the instruction pointer register (for use with get_register/set_register).
     fn instruction_pointer_register_name(&self) -> &'static str;
+}
+
+/// Default implementation for `CpuContext::memoize_register`.
+fn default_memoize_register(registers: &[&'static str], reg: &str) -> Option<&'static str> {
+    let idx = registers.iter().position(|val| *val == reg)?;
+    Some(registers[idx])
 }
 
 #[derive(Debug, Clone)]
@@ -265,15 +272,20 @@ impl CpuContext for md::CONTEXT_AMD64 {
 impl CpuContext for md::CONTEXT_ARM {
     type Register = u32;
 
-    // TODO: Should be deduplicated:
-    // const REGISTERS: &'static [&'static str] = &[
-    //     "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r12", "fp", "sp", "lr",
-    //     "pc",
-    // ];
     const REGISTERS: &'static [&'static str] = &[
-        "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12", "r13",
-        "r14", "r15", "pc", "lr", "fp", "sp",
+        "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r12", "fp", "sp", "lr",
+        "pc",
     ];
+
+    fn memoize_register(&self, reg: &str) -> Option<&'static str> {
+        match reg {
+            "r11" => Some("fp"),
+            "r13" => Some("sp"),
+            "r14" => Some("lr"),
+            "r15" => Some("pc"),
+            _ => default_memoize_register(Self::REGISTERS, reg),
+        }
+    }
 
     fn register_is_valid(&self, reg: &str, valid: &MinidumpContextValidity) -> bool {
         if let MinidumpContextValidity::Some(ref which) = valid {
@@ -354,17 +366,19 @@ impl CpuContext for md::CONTEXT_ARM {
 impl CpuContext for md::CONTEXT_ARM64_OLD {
     type Register = u64;
 
-    // TODO: Should be deduplicated:
-    // const REGISTERS: &'static [&'static str] = &[
-    //     "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
-    //     "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26",
-    //     "x27", "x28", "fp", "lr", "sp", "pc",
-    // ];
     const REGISTERS: &'static [&'static str] = &[
         "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
         "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26",
-        "x27", "x28", "x29", "x30", "pc", "lr", "fp", "sp",
+        "x27", "x28", "fp", "lr", "sp", "pc",
     ];
+
+    fn memoize_register(&self, reg: &str) -> Option<&'static str> {
+        match reg {
+            "x29" => Some("fp"),
+            "x30" => Some("lr"),
+            _ => default_memoize_register(Self::REGISTERS, reg),
+        }
+    }
 
     fn register_is_valid(&self, reg: &str, valid: &MinidumpContextValidity) -> bool {
         if let MinidumpContextValidity::Some(ref which) = valid {
@@ -473,18 +487,19 @@ impl CpuContext for md::CONTEXT_ARM64_OLD {
 impl CpuContext for md::CONTEXT_ARM64 {
     type Register = u64;
 
-    // TODO: Should be deduplicated:
-    // const REGISTERS: &'static [&'static str] = &[
-    //     "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
-    //     "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26",
-    //     "x27", "x28", "fp", "lr", "sp", "pc",
-    // ];
-
     const REGISTERS: &'static [&'static str] = &[
         "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
         "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26",
-        "x27", "x28", "x29", "x30", "pc", "lr", "fp", "sp",
+        "x27", "x28", "fp", "lr", "sp", "pc",
     ];
+
+    fn memoize_register(&self, reg: &str) -> Option<&'static str> {
+        match reg {
+            "x29" => Some("fp"),
+            "x30" => Some("lr"),
+            _ => default_memoize_register(Self::REGISTERS, reg),
+        }
+    }
 
     fn register_is_valid(&self, reg: &str, valid: &MinidumpContextValidity) -> bool {
         if let MinidumpContextValidity::Some(ref which) = valid {
@@ -1548,5 +1563,36 @@ impl MinidumpContext {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    /// Smoke test for the default implementation of `memoize_register`.
+    fn test_memoize_amd64() {
+        let context = md::CONTEXT_AMD64::default();
+        assert_eq!(context.memoize_register("rip"), Some("rip"));
+        assert_eq!(context.memoize_register("foo"), None);
+    }
+
+    #[test]
+    /// Test ARM register aliases by example of `fp`.
+    fn test_memoize_arm_alias() {
+        let context = md::CONTEXT_ARM::default();
+        assert_eq!(context.memoize_register("r11"), Some("fp"));
+        assert_eq!(context.memoize_register("fp"), Some("fp"));
+        assert_eq!(context.memoize_register("foo"), None);
+    }
+
+    #[test]
+    /// Test ARM register aliases by example of `fp`.
+    fn test_memoize_arm64_alias() {
+        let context = md::CONTEXT_ARM64::default();
+        assert_eq!(context.memoize_register("x29"), Some("fp"));
+        assert_eq!(context.memoize_register("fp"), Some("fp"));
+        assert_eq!(context.memoize_register("foo"), None);
     }
 }

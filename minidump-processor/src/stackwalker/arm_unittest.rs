@@ -202,6 +202,7 @@ fn test_scan_first_frame() {
 
     {
         // Frame 0
+
         let frame = &s.frames[0];
         assert_eq!(frame.trust, FrameTrust::Context);
         assert_eq!(frame.context.valid, MinidumpContextValidity::All);
@@ -426,7 +427,7 @@ fn test_frame_pointer_infinite_equality() {
     // Never get to frame 2, alas!
 }
 
-const CALLEE_SAVE_REGS: &[&str] = &["pc", "sp", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11"];
+const CALLEE_SAVE_REGS: &[&str] = &["pc", "sp", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "fp"];
 
 fn init_cfi_state() -> (TestFixture, Section, CONTEXT_ARM, MinidumpContextValidity) {
     let mut f = TestFixture::new();
