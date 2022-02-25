@@ -801,14 +801,14 @@ fn eval_win_expr(expr: &str, info: &StackInfoWin, walker: &mut dyn FrameWalker) 
     // for some windows toolchains.
     let tokens = expr
         .split_ascii_whitespace()
-        .map(|x| {
+        // flatten the returned Arrays
+        .flat_map(|x| {
             if x.starts_with('=') && x.len() > 1 {
                 [Some(&x[0..1]), Some(&x[1..])]
             } else {
                 [Some(x), None]
             }
         })
-        .flatten() // get rid of the Array
         .flatten(); // get rid of the Option::None's
 
     // Evaluate the expressions
